@@ -326,10 +326,14 @@ function App() {
     deleteProvider,
     saveUsageScript,
     setAsDefaultModel,
+    pendingCodexSwitch,
+    confirmPendingCodexSwitch,
+    cancelPendingCodexSwitch,
   } = useProviderActions(
     activeApp,
     currentAppUsesProxy && isProxyRunning,
     isProxyRunning && isCurrentAppTakeoverActive,
+    providers[currentProviderId] ?? null,
   );
   const handleEnablePiProvider = async (provider: Provider) => {
     try {
@@ -1818,6 +1822,29 @@ function App() {
           })();
         }}
         onCancel={() => setLaunchDashboardOpen(false)}
+      />
+
+      {/*
+        Local customization: switching Codex between the official ChatGPT
+        login and a custom provider silently changes which app features work.
+        Spell that out once, with an opt-out.
+      */}
+      <ConfirmDialog
+        isOpen={pendingCodexSwitch !== null}
+        variant="info"
+        title={t("codexSwitchConfirm.title")}
+        message={t(
+          pendingCodexSwitch?.category === "official"
+            ? "codexSwitchConfirm.toOfficial"
+            : "codexSwitchConfirm.toCustom",
+          { provider: pendingCodexSwitch?.name ?? "" },
+        )}
+        confirmText={t("codexSwitchConfirm.confirm")}
+        checkboxLabel={t("codexSwitchConfirm.dontAskAgain")}
+        onConfirm={(dontAskAgain) => {
+          void confirmPendingCodexSwitch(dontAskAgain);
+        }}
+        onCancel={cancelPendingCodexSwitch}
       />
 
       <DeepLinkImportDialog />

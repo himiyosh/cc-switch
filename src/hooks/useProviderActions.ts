@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -41,13 +41,50 @@ import { isOAuthProviderType } from "@/config/constants";
  * Hook for managing provider actions (add, update, delete, switch)
  * Extracts business logic from App.tsx
  */
+/**
+ * Local customization: remembers a "don't ask again" answer for the Codex
+ * official <-> custom confirmation. Kept in localStorage rather than the
+ * settings DB so the patch stays confined to the frontend and survives
+ * upstream merges cleanly.
+ */
+const CODEX_SWITCH_CONFIRM_STORAGE_KEY = "ccswitch.skipCodexSwitchConfirm";
+
+function readSkipCodexSwitchConfirm(): boolean {
+  try {
+    return localStorage.getItem(CODEX_SWITCH_CONFIRM_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function useProviderActions(
   activeApp: AppId,
   isProxyRunning?: boolean,
   isProxyTakeover?: boolean,
+  currentProvider?: Provider | null,
 ) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+
+  const currentCodexProviderIsOfficial = currentProvider
+    ? currentProvider.category === "official"
+    : undefined;
+
+  const [skipCodexSwitchConfirm, setSkipCodexSwitchConfirmState] = useState(
+    readSkipCodexSwitchConfirm,
+  );
+  const setSkipCodexSwitchConfirm = useCallback((skip: boolean) => {
+    setSkipCodexSwitchConfirmState(skip);
+    try {
+      if (skip) {
+        localStorage.setItem(CODEX_SWITCH_CONFIRM_STORAGE_KEY, "1");
+      } else {
+        localStorage.removeItem(CODEX_SWITCH_CONFIRM_STORAGE_KEY);
+      }
+    } catch {
+      // Non-fatal: the preference simply won't persist.
+    }
+  }, []);
 
   const addProviderMutation = useAddProviderMutation(activeApp);
   const updateProviderMutation = useUpdateProviderMutation(activeApp);
@@ -166,8 +203,19 @@ export function useProviderActions(
     [updateProviderMutation],
   );
 
-  // 切换供应商
-  const switchProvider = useCallback(
+  // ---------------------------------------------------------------------
+  // Local customization: confirm before a Codex official <-> custom switch.
+  //
+  // Moving Codex onto a custom provider silently drops every ChatGPT
+  // account-bound feature (Sites, Usage, sign-out, cloud projects, voice
+  // input) because the app no longer authenticates as a ChatGPT user. There
+  // is no in-app signal for this, so users discover it as "my menus
+  // disappeared". Verified by A/B switching on 2026-08-16.
+  // ---------------------------------------------------------------------
+  const [pendingCodexSwitch, setPendingCodexSwitch] =
+    useState<Provider | null>(null);
+
+  const performSwitch = useCallback(
     async (provider: Provider) => {
       const isCopilotProvider =
         activeApp === "claude" &&
@@ -351,6 +399,55 @@ export function useProviderActions(
     ],
   );
 
+  /**
+   * Gate for `performSwitch`. Only Codex switches that cross the
+   * official <-> custom boundary are worth interrupting; everything else
+   * (other apps, custom -> custom, re-selecting the active provider) goes
+   * straight through so the one-click flow stays one click.
+   */
+  const switchProvider = useCallback(
+    async (provider: Provider) => {
+      if (activeApp !== "codex" || skipCodexSwitchConfirm) {
+        return performSwitch(provider);
+      }
+
+      const targetIsOfficial = provider.category === "official";
+      const currentIsOfficial = currentCodexProviderIsOfficial;
+      if (
+        currentIsOfficial === undefined ||
+        targetIsOfficial === currentIsOfficial
+      ) {
+        return performSwitch(provider);
+      }
+
+      setPendingCodexSwitch(provider);
+    },
+    [
+      activeApp,
+      performSwitch,
+      skipCodexSwitchConfirm,
+      currentCodexProviderIsOfficial,
+    ],
+  );
+
+  const confirmPendingCodexSwitch = useCallback(
+    async (dontAskAgain: boolean) => {
+      const provider = pendingCodexSwitch;
+      setPendingCodexSwitch(null);
+      if (dontAskAgain) {
+        setSkipCodexSwitchConfirm(true);
+      }
+      if (provider) {
+        await performSwitch(provider);
+      }
+    },
+    [pendingCodexSwitch, performSwitch, setSkipCodexSwitchConfirm],
+  );
+
+  const cancelPendingCodexSwitch = useCallback(() => {
+    setPendingCodexSwitch(null);
+  }, []);
+
   // 删除供应商
   const deleteProvider = useCallback(
     async (id: string) => {
@@ -475,6 +572,10 @@ export function useProviderActions(
     deleteProvider,
     saveUsageScript,
     setAsDefaultModel,
+    // Local customization: Codex official <-> custom confirmation
+    pendingCodexSwitch,
+    confirmPendingCodexSwitch,
+    cancelPendingCodexSwitch,
     isLoading:
       addProviderMutation.isPending ||
       updateProviderMutation.isPending ||

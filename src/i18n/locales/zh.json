@@ -3240,5 +3240,12 @@
     "expiredHint": "请运行 {{tool}} 命令刷新登录",
     "queryFailed": "查询失败",
     "refresh": "刷新"
+  },
+  "codexSwitchConfirm": {
+    "title": "切换 Codex 供应商？",
+    "toCustom": "切换到「{{provider}}」后，Codex 将使用自定义供应商。\n\n获得：更便宜的模型，且不消耗 ChatGPT 的每周额度。\n\n失去（切回前）：Sites、菜单中的 Usage 与退出登录、云端项目、语音输入。这些功能绑定 ChatGPT 账号登录，使用自定义供应商期间不会显示。\n\n需要重启 Codex 才能生效。",
+    "toOfficial": "切换到「{{provider}}」后，Codex 将恢复使用 ChatGPT 账号。\n\n获得：Sites、菜单中的 Usage 与退出登录、云端项目、语音输入。\n\n失去：更便宜的第三方模型。请求将重新消耗 ChatGPT 套餐额度。\n\n需要重启 Codex 才能生效。",
+    "confirm": "切换",
+    "dontAskAgain": "不再提示"
   }
 }

@@ -794,7 +794,7 @@ pub fn write_codex_live_atomic(
 
     // 准备写入内容
     let cfg_text = match config_text_opt {
-        Some(s) => s.to_string(),
+        Some(s) => pin_codex_memory_models(&merge_codex_live_config_text(s, &config_path)),
         None => String::new(),
     };
     if !cfg_text.trim().is_empty() {
@@ -869,7 +869,9 @@ pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
 pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(), AppError> {
     let config_path = get_codex_config_path();
     let cfg_text = match config_text_opt {
-        Some(config_text) => config_text.to_string(),
+        Some(config_text) => {
+            pin_codex_memory_models(&merge_codex_live_config_text(config_text, &config_path))
+        }
         None => String::new(),
     };
 
@@ -878,6 +880,216 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
     }
 
     write_text_file(&config_path, &cfg_text)
+}
+
+// ---------------------------------------------------------------------------
+// Local customization: keep Codex's background "memories" pipeline off OpenAI
+// models when a custom provider is active.
+//
+// Codex hardcodes `gpt-5.6-luna` (extraction) and `gpt-5.6-terra`
+// (consolidation) for its background memory jobs, but reuses the active
+// `model_provider` transport. On a custom provider those OpenAI-named requests
+// are therefore sent to *that* provider. Direct upstreams (Azure, Bedrock,
+// DeepSeek) answer 404 — loud, and duly reported upstream. Routers such as
+// OpenRouter instead resolve the slug successfully and silently bill the user's
+// account for OpenAI models on every new session.
+//
+// Measured 2026-08-16 against OpenRouter: three background calls per new chat,
+// ~15k input tokens each, none of them surfaced anywhere in the Codex UI.
+//
+// Policy (cc-switch owns these two fields):
+//   custom provider -> pin both to the provider's own top-level `model`
+//   official OpenAI -> remove both, restoring Codex's own defaults
+// Pinning to `model` rather than to a fixed cheap model guarantees the slug is
+// always servable by whichever provider is active.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Local customization: stop cc-switch from destroying a hand-maintained
+// config.toml.
+//
+// cc-switch keeps a verbatim *text snapshot* of config.toml per provider in its
+// own SQLite database and, on every live write, replaces the whole file with
+// that string. There is no merge step anywhere, so any section the snapshot
+// happens not to contain is simply gone.
+//
+// Observed 2026-08-16: a 283-line hand-maintained config.toml became 29 lines,
+// keeping only `[mcp_servers]`. The mechanism is exact — the seeded
+// `codex-official` provider ships `{"auth":{},"config":""}`
+// (database/dao/providers_seed.rs), so activating it writes zero bytes, and the
+// MCP table is then re-projected from a separate DB table straight afterwards.
+// Lost: 30 `[projects.*]`, 29 `[plugins.*]`, `[desktop]`, `[features]`,
+// `[memories]`, `[marketplaces]`, `[shell_environment_policy]`, and a
+// hand-written `[model_providers.openrouter]`.
+//
+// Known upstream and unfixed: issues #4254 and #3700 are open with unmerged fix
+// PRs (#4381, #3697); #1088, #1863, #2681, #3824 and #4779 are earlier reports.
+//
+// Fix: treat the file on disk as the base and let the incoming text drive only
+// the keys cc-switch legitimately owns. A managed key present in the incoming
+// text is applied; a managed key absent from it is removed (so switching away
+// from a provider still clears its settings, and a stale
+// `experimental_bearer_token` is never resurrected). Everything else is left
+// exactly as the user wrote it.
+// ---------------------------------------------------------------------------
+
+/// Top-level keys cc-switch sets *or* deliberately clears. Present in the
+/// incoming text -> applied; absent -> removed from the merged result.
+const CODEX_MANAGED_TOP_LEVEL_KEYS: [&str; 4] = [
+    "model",
+    "model_provider",
+    "model_catalog_json",
+    "experimental_bearer_token",
+];
+
+/// Keys that belong to a provider profile but double as user preferences.
+/// Applied when the incoming text carries them, never removed when it does not,
+/// so a provider snapshot cannot silently reset a hand-tuned value.
+const CODEX_APPLY_IF_PRESENT_TOP_LEVEL_KEYS: [&str; 4] = [
+    "model_reasoning_effort",
+    "disable_response_storage",
+    CODEX_WEB_SEARCH_FIELD,
+    "mcp_servers",
+];
+
+/// `[model_providers.*]` ids cc-switch owns. Any other block under
+/// `model_providers` is the user's own and must survive untouched — this is what
+/// keeps a hand-written `[model_providers.openrouter]` alive.
+fn codex_managed_provider_ids(incoming: &DocumentMut) -> Vec<String> {
+    let mut ids = vec![
+        CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string(),
+        CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID.to_string(),
+    ];
+    // Whatever the incoming text is actively pointing at is being (re)defined.
+    if let Some(active) = incoming.get("model_provider").and_then(|item| item.as_str()) {
+        ids.push(active.to_string());
+    }
+    ids
+}
+
+/// Merge `incoming_text` onto whatever is currently at `config_path`.
+pub(crate) fn merge_codex_live_config_text(incoming_text: &str, config_path: &Path) -> String {
+    let existing_text = match std::fs::read_to_string(config_path) {
+        Ok(text) => text,
+        // Fresh install: nothing to protect.
+        Err(_) => return incoming_text.to_string(),
+    };
+    if existing_text.trim().is_empty() {
+        return incoming_text.to_string();
+    }
+
+    let (Ok(mut merged), Ok(incoming)) = (
+        existing_text.parse::<DocumentMut>(),
+        // An empty snapshot is legitimate input (it means "clear the managed
+        // keys"), and `""` parses to an empty document, so no special case.
+        incoming_text.parse::<DocumentMut>(),
+    ) else {
+        // Either side unparseable: do not gamble on a merge. Hand back exactly
+        // what the caller asked for and let its own validation decide.
+        return incoming_text.to_string();
+    };
+
+    for key in CODEX_MANAGED_TOP_LEVEL_KEYS {
+        match incoming.get(key) {
+            Some(item) => merged[key] = item.clone(),
+            None => {
+                merged.as_table_mut().remove(key);
+            }
+        }
+    }
+
+    for key in CODEX_APPLY_IF_PRESENT_TOP_LEVEL_KEYS {
+        if let Some(item) = incoming.get(key) {
+            merged[key] = item.clone();
+        }
+    }
+
+    // `model_providers` is merged per-id rather than wholesale.
+    let managed_ids = codex_managed_provider_ids(&incoming);
+    let incoming_providers = incoming
+        .get("model_providers")
+        .and_then(|item| item.as_table());
+    if incoming_providers.is_some() || merged.as_table().contains_key("model_providers") {
+        if merged.get("model_providers").is_none() {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(true);
+            merged["model_providers"] = toml_edit::Item::Table(table);
+        }
+        if let Some(target) = merged["model_providers"].as_table_mut() {
+            for id in &managed_ids {
+                match incoming_providers.and_then(|table| table.get(id)) {
+                    Some(item) => target[id.as_str()] = item.clone(),
+                    None => {
+                        target.remove(id);
+                    }
+                }
+            }
+            if target.is_empty() {
+                merged.as_table_mut().remove("model_providers");
+            }
+        }
+    }
+
+    merged.to_string()
+}
+
+const CODEX_MEMORIES_TABLE: &str = "memories";
+const CODEX_MEMORY_MANAGED_FIELDS: [&str; 2] = ["extract_model", "consolidation_model"];
+
+fn pin_codex_memory_models(config_text: &str) -> String {
+    let mut doc = match config_text.parse::<DocumentMut>() {
+        Ok(doc) => doc,
+        // Malformed input is the caller's to reject; pass it through untouched.
+        Err(_) => return config_text.to_string(),
+    };
+
+    let provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .unwrap_or_default()
+        .to_string();
+    // An absent or `openai` provider means Codex talks to OpenAI anyway, so its
+    // built-in defaults are already correct.
+    let is_custom = !provider.is_empty() && !provider.eq_ignore_ascii_case("openai");
+
+    let model = doc
+        .get("model")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
+
+    match (is_custom, model) {
+        (true, Some(model)) => {
+            if doc.get(CODEX_MEMORIES_TABLE).is_none() {
+                let mut table = toml_edit::Table::new();
+                table.set_implicit(false);
+                doc[CODEX_MEMORIES_TABLE] = toml_edit::Item::Table(table);
+            }
+            let Some(memories) = doc[CODEX_MEMORIES_TABLE].as_table_mut() else {
+                return config_text.to_string();
+            };
+            for field in CODEX_MEMORY_MANAGED_FIELDS {
+                memories[field] = toml_edit::value(model.as_str());
+            }
+        }
+        _ => {
+            let Some(memories) = doc
+                .get_mut(CODEX_MEMORIES_TABLE)
+                .and_then(|item| item.as_table_mut())
+            else {
+                return doc.to_string();
+            };
+            for field in CODEX_MEMORY_MANAGED_FIELDS {
+                memories.remove(field);
+            }
+            if memories.is_empty() {
+                doc.as_table_mut().remove(CODEX_MEMORIES_TABLE);
+            }
+        }
+    }
+
+    doc.to_string()
 }
 
 pub fn extract_codex_auth_api_key(auth: &Value) -> Option<String> {
@@ -5456,5 +5668,242 @@ model_catalog_json = "cc-switch-model-catalog.json"
             result.is_err(),
             "file larger than MAX_CODEX_CATALOG_BYTES must be rejected"
         );
+    }
+
+    // --- local customization: memory-model pinning ---------------------------
+
+    #[test]
+    fn pin_memory_models_sets_fields_for_custom_provider() {
+        let input = "model_provider = \"custom\"\nmodel = \"deepseek/deepseek-v4-pro\"\n";
+        let out = pin_codex_memory_models(input);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+        let memories = parsed["memories"].as_table().expect("memories table");
+        assert_eq!(
+            memories["extract_model"].as_str(),
+            Some("deepseek/deepseek-v4-pro")
+        );
+        assert_eq!(
+            memories["consolidation_model"].as_str(),
+            Some("deepseek/deepseek-v4-pro")
+        );
+    }
+
+    #[test]
+    fn pin_memory_models_overwrites_stale_value_from_previous_provider() {
+        let input = concat!(
+            "model_provider = \"custom\"\n",
+            "model = \"moonshotai/kimi-k3\"\n",
+            "\n[memories]\nextract_model = \"deepseek/deepseek-v4-flash\"\n",
+        );
+        let out = pin_codex_memory_models(input);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+        let memories = parsed["memories"].as_table().expect("memories table");
+        assert_eq!(
+            memories["extract_model"].as_str(),
+            Some("moonshotai/kimi-k3"),
+            "a slug left over from another provider must not survive a switch"
+        );
+    }
+
+    #[test]
+    fn pin_memory_models_removes_fields_for_official_provider() {
+        let input = concat!(
+            "model = \"gpt-5.6-sol\"\n",
+            "\n[memories]\n",
+            "extract_model = \"deepseek/deepseek-v4-pro\"\n",
+            "consolidation_model = \"deepseek/deepseek-v4-pro\"\n",
+        );
+        let out = pin_codex_memory_models(input);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+        assert!(
+            !parsed.contains_key("memories"),
+            "an emptied memories table should be dropped so Codex defaults apply"
+        );
+    }
+
+    #[test]
+    fn pin_memory_models_preserves_unrelated_memory_settings() {
+        let input = concat!(
+            "model = \"gpt-5.6-sol\"\n",
+            "\n[memories]\n",
+            "generate_memories = false\n",
+            "extract_model = \"deepseek/deepseek-v4-pro\"\n",
+        );
+        let out = pin_codex_memory_models(input);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+        let memories = parsed["memories"].as_table().expect("memories table");
+        assert_eq!(memories["generate_memories"].as_bool(), Some(false));
+        assert!(!memories.contains_key("extract_model"));
+    }
+
+    #[test]
+    fn pin_memory_models_passes_through_malformed_input() {
+        let input = "this is not = valid toml [[[";
+        assert_eq!(pin_codex_memory_models(input), input);
+    }
+
+    // --- local customization: config.toml merge ------------------------------
+
+    fn write_tmp_config(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, body).expect("write");
+        path
+    }
+
+    /// The exact reported data loss: an empty provider snapshot must not be able
+    /// to erase a hand-maintained config.toml.
+    #[test]
+    fn merge_empty_snapshot_keeps_user_sections() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = write_tmp_config(
+            &temp,
+            concat!(
+                "model = \"deepseek/deepseek-v4-pro\"\n",
+                "model_provider = \"openrouter\"\n",
+                "notify = [\"/some/hook\"]\n",
+                "\n[projects.\"/Users/me/repo\"]\ntrust_level = \"trusted\"\n",
+                "\n[plugins.\"github@openai-curated\"]\nenabled = true\n",
+                "\n[desktop]\nappearanceTheme = \"dark\"\n",
+                "\n[features]\nmemories = true\n",
+                "\n[model_providers.openrouter]\nbase_url = \"https://openrouter.ai/api/v1\"\n",
+            ),
+        );
+
+        let out = merge_codex_live_config_text("", &path);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+
+        for key in ["projects", "plugins", "desktop", "features", "notify"] {
+            assert!(parsed.contains_key(key), "{key} must survive an empty snapshot");
+        }
+        assert_eq!(parsed["desktop"]["appearanceTheme"].as_str(), Some("dark"));
+        // Managed keys are cleared, which is what "switch to the empty official
+        // provider" should mean: Codex falls back to its own defaults.
+        assert!(!parsed.contains_key("model"));
+        assert!(!parsed.contains_key("model_provider"));
+    }
+
+    #[test]
+    fn merge_applies_incoming_managed_keys() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = write_tmp_config(
+            &temp,
+            "model = \"gpt-5.6-sol\"\n\n[desktop]\nsansFontSize = 13\n",
+        );
+
+        let incoming = concat!(
+            "model_provider = \"custom\"\n",
+            "model = \"deepseek/deepseek-v4-pro\"\n",
+            "\n[model_providers.custom]\nbase_url = \"https://openrouter.ai/api/v1\"\n",
+        );
+        let out = merge_codex_live_config_text(incoming, &path);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+
+        assert_eq!(parsed["model"].as_str(), Some("deepseek/deepseek-v4-pro"));
+        assert_eq!(parsed["model_provider"].as_str(), Some("custom"));
+        assert_eq!(
+            parsed["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(parsed["desktop"]["sansFontSize"].as_integer(), Some(13));
+    }
+
+    /// A hand-written provider block that cc-switch knows nothing about must not
+    /// be collateral damage when it rewrites its own block.
+    #[test]
+    fn merge_keeps_foreign_model_provider_blocks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = write_tmp_config(
+            &temp,
+            concat!(
+                "model_provider = \"openrouter\"\n",
+                "\n[model_providers.openrouter]\n",
+                "name = \"himiyosh\"\nbase_url = \"https://openrouter.ai/api/v1\"\n",
+                "\n[model_providers.openrouter.auth]\ncommand = \"sh\"\n",
+            ),
+        );
+
+        let incoming = concat!(
+            "model_provider = \"custom\"\n",
+            "\n[model_providers.custom]\nbase_url = \"https://example.test/v1\"\n",
+        );
+        let out = merge_codex_live_config_text(incoming, &path);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+
+        assert_eq!(
+            parsed["model_providers"]["openrouter"]["name"].as_str(),
+            Some("himiyosh"),
+            "a user's own provider block must survive"
+        );
+        assert!(parsed["model_providers"]["openrouter"]
+            .as_table()
+            .expect("table")
+            .contains_key("auth"));
+        assert_eq!(
+            parsed["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://example.test/v1")
+        );
+    }
+
+    /// Dropping a managed key must actually drop it — a leftover bearer token
+    /// would be sent to the next provider.
+    #[test]
+    fn merge_removes_managed_keys_absent_from_incoming() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = write_tmp_config(
+            &temp,
+            concat!(
+                "model_provider = \"custom\"\n",
+                "experimental_bearer_token = \"sk-old-secret\"\n",
+                "model_catalog_json = \"/tmp/old-catalog.json\"\n",
+                "\n[model_providers.custom]\nbase_url = \"https://old.test/v1\"\n",
+            ),
+        );
+
+        let incoming = "model_provider = \"custom\"\nmodel = \"kimi\"\n";
+        let out = merge_codex_live_config_text(incoming, &path);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+
+        assert!(!parsed.contains_key("experimental_bearer_token"));
+        assert!(!parsed.contains_key("model_catalog_json"));
+        assert!(
+            !parsed
+                .get("model_providers")
+                .and_then(|item| item.as_table())
+                .map(|table| table.contains_key("custom"))
+                .unwrap_or(false),
+            "the managed provider block is redefined by the snapshot, not merged"
+        );
+    }
+
+    /// User preferences that also appear in provider templates are applied when
+    /// offered but never silently cleared.
+    #[test]
+    fn merge_never_clears_apply_if_present_keys() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = write_tmp_config(
+            &temp,
+            "model_reasoning_effort = \"max\"\ndisable_response_storage = true\n",
+        );
+
+        let out = merge_codex_live_config_text("model = \"kimi\"\n", &path);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+        assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("max"));
+        assert_eq!(parsed["disable_response_storage"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn merge_is_noop_without_existing_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("missing.toml");
+        let incoming = "model = \"gpt-5.6-sol\"\n";
+        assert_eq!(merge_codex_live_config_text(incoming, &path), incoming);
+    }
+
+    #[test]
+    fn merge_passes_through_when_existing_is_malformed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = write_tmp_config(&temp, "not = valid [[[");
+        let incoming = "model = \"gpt-5.6-sol\"\n";
+        assert_eq!(merge_codex_live_config_text(incoming, &path), incoming);
     }
 }

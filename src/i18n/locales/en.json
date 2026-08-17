@@ -3240,5 +3240,12 @@
     "expiredHint": "Run the {{tool}} command to refresh your login",
     "queryFailed": "Query failed",
     "refresh": "Refresh"
+  },
+  "codexSwitchConfirm": {
+    "title": "Switch Codex provider?",
+    "toCustom": "Switching to \"{{provider}}\" moves Codex onto a custom provider.\n\nYou gain: cheaper models, and no ChatGPT weekly quota usage.\n\nYou lose, until you switch back: Sites, the Usage and sign-out menu entries, cloud projects, and voice input. These are tied to your ChatGPT account login, so they disappear while a custom provider is active.\n\nCodex must be restarted for the change to take effect.",
+    "toOfficial": "Switching to \"{{provider}}\" returns Codex to your ChatGPT account.\n\nYou gain: Sites, the Usage and sign-out menu entries, cloud projects, and voice input.\n\nYou lose: cheaper third-party models. Requests will consume your ChatGPT plan quota again.\n\nCodex must be restarted for the change to take effect.",
+    "confirm": "Switch",
+    "dontAskAgain": "Don't ask again"
   }
 }

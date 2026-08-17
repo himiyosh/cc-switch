@@ -3241,5 +3241,12 @@
     "expiredHint": "請執行 {{tool}} 命令重新整理登入",
     "queryFailed": "查詢失敗",
     "refresh": "重新整理"
+  },
+  "codexSwitchConfirm": {
+    "title": "切換 Codex 供應商？",
+    "toCustom": "切換至「{{provider}}」後，Codex 將使用自訂供應商。\n\n獲得：更便宜的模型，且不消耗 ChatGPT 的每週額度。\n\n失去（切回前）：Sites、選單中的 Usage 與登出、雲端專案、語音輸入。這些功能綁定 ChatGPT 帳號登入，使用自訂供應商期間不會顯示。\n\n需要重新啟動 Codex 才會生效。",
+    "toOfficial": "切換至「{{provider}}」後，Codex 將恢復使用 ChatGPT 帳號。\n\n獲得：Sites、選單中的 Usage 與登出、雲端專案、語音輸入。\n\n失去：更便宜的第三方模型。請求將重新消耗 ChatGPT 方案額度。\n\n需要重新啟動 Codex 才會生效。",
+    "confirm": "切換",
+    "dontAskAgain": "不再提示"
   }
 }

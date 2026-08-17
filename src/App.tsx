@@ -40,7 +40,10 @@ import {
   type ProviderSwitchEvent,
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
-import { useProviderActions } from "@/hooks/useProviderActions";
+import {
+  useProviderActions,
+  codexProviderIsCustom,
+} from "@/hooks/useProviderActions";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
 import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
 import { hermesApi } from "@/lib/api/hermes";
@@ -1834,7 +1837,10 @@ function App() {
         variant="info"
         title={t("codexSwitchConfirm.title")}
         message={t(
-          pendingCodexSwitch?.category === "official"
+          // The gate only opens when the boundary is actually crossed, so the
+          // direction is simply "is the *current* provider a custom one".
+          providers[currentProviderId] &&
+            codexProviderIsCustom(providers[currentProviderId])
             ? "codexSwitchConfirm.toOfficial"
             : "codexSwitchConfirm.toCustom",
           { provider: pendingCodexSwitch?.name ?? "" },

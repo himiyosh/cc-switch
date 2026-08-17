@@ -57,6 +57,28 @@ function readSkipCodexSwitchConfirm(): boolean {
   }
 }
 
+/**
+ * Does this Codex provider route through a custom `model_provider`?
+ *
+ * `provider.category` is not usable for this: a provider imported from an
+ * existing `~/.codex/config.toml` is stored as `official` regardless of what it
+ * actually points at, so an OpenRouter setup and the seeded ChatGPT card are
+ * indistinguishable by category alone (verified against the live DB).
+ *
+ * What actually decides whether the ChatGPT account-bound features keep working
+ * is the top-level `model_provider` key, so read that instead. Absent — or
+ * literally `openai` — means Codex talks to OpenAI with the user's ChatGPT
+ * login; anything else is a custom provider.
+ */
+export function codexProviderIsCustom(provider: Provider): boolean {
+  const config = (provider.settingsConfig as Record<string, unknown> | undefined)
+    ?.config;
+  if (typeof config !== "string") return false;
+  const match = config.match(/^[ \t]*model_provider[ \t]*=[ \t]*"([^"]*)"/m);
+  const id = match?.[1]?.trim();
+  return !!id && id.toLowerCase() !== "openai";
+}
+
 export function useProviderActions(
   activeApp: AppId,
   isProxyRunning?: boolean,
@@ -66,8 +88,8 @@ export function useProviderActions(
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const currentCodexProviderIsOfficial = currentProvider
-    ? currentProvider.category === "official"
+  const currentCodexProviderIsCustom = currentProvider
+    ? codexProviderIsCustom(currentProvider)
     : undefined;
 
   const [skipCodexSwitchConfirm, setSkipCodexSwitchConfirmState] = useState(
@@ -411,11 +433,10 @@ export function useProviderActions(
         return performSwitch(provider);
       }
 
-      const targetIsOfficial = provider.category === "official";
-      const currentIsOfficial = currentCodexProviderIsOfficial;
+      const targetIsCustom = codexProviderIsCustom(provider);
       if (
-        currentIsOfficial === undefined ||
-        targetIsOfficial === currentIsOfficial
+        currentCodexProviderIsCustom === undefined ||
+        targetIsCustom === currentCodexProviderIsCustom
       ) {
         return performSwitch(provider);
       }
@@ -426,7 +447,7 @@ export function useProviderActions(
       activeApp,
       performSwitch,
       skipCodexSwitchConfirm,
-      currentCodexProviderIsOfficial,
+      currentCodexProviderIsCustom,
     ],
   );
 

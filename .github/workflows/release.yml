@@ -83,7 +83,7 @@ jobs:
           mkdir -p "$DMG_STAGE_DIR"
           ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch.app"
           create-dmg \
-            --volname "CC Switch himiyosh" \
+            --volname "CC Switch" \
             --window-size 660 400 \
             --window-pos 200 120 \
             --icon-size 80 \
@@ -100,29 +100,42 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: CC Switch ${{ github.ref_name }} (himiyosh custom)
+          name: CC Switch ${{ github.ref_name }} — Custom Build
           body: |
-            ## CC Switch ${{ github.ref_name }} — himiyosh カスタム版
+            ## CC Switch ${{ github.ref_name }} — カスタムビルド / Custom Build
 
-            ⚠️ これは [farion1231/cc-switch](https://github.com/farion1231/cc-switch) の**非公式な個人フォーク**のビルドです。公式版は upstream の [Releases](https://github.com/farion1231/cc-switch/releases) から入手してください。
+            これは [farion1231/cc-switch](https://github.com/farion1231/cc-switch) の非公式フォークのビルドです。Codex（ChatGPT Desktop App）を OpenRouter などの外部プロバイダーと**安心して行き来できる**ようにする修正を加えています。公式版は upstream の [Releases](https://github.com/farion1231/cc-switch/releases) をご利用ください。
 
-            ### 本家との違い
-            - プロバイダー切り替え時に手書きの config.toml セクションを保護（保護マージ）
-            - Codex のメモリ抽出/統合モデルをアクティブモデルへピン（GPT への裏課金防止）
-            - 公式 ⇄ カスタム切り替え時の確認ダイアログ
-            - live 設定インポート時の誤分類修正（ChatGPT OAuth 誤紐付けの根治）
-            - OTA 自動更新は無効（更新は upstream merge + 再ビルドで実施）
+            *An unofficial fork build focused on making Codex (the ChatGPT Desktop App) safe to use alongside third-party providers such as OpenRouter. For the official app, use the upstream releases.*
 
-            詳細: [docs/FORK_SETUP.ja.md](https://github.com/himiyosh/cc-switch/blob/himiyosh/local-customizations/docs/FORK_SETUP.ja.md)
+            ### 本家との違い（何が嬉しいのか）
 
-            ### インストール（Apple Silicon 専用）
-            Apple 公証を行っていないため、初回はターミナルで隔離属性を外してから起動してください:
+            - **手作業の設定が切り替えで消えない** — 本家はプロバイダー切り替えのたびに Codex の設定ファイル（config.toml）を保存済みスナップショットで丸ごと置き換えるため、手作業で足した設定（プロジェクトの信頼設定・プラグイン・自作のプロバイダー定義など）がその瞬間に消えることがあります（本家の既知問題 #4254 / #3700 ほか）。このビルドは cc-switch が管理する項目だけを書き換え、それ以外の行はそのまま残します。
+            - **身に覚えのない OpenAI 課金を防ぐ** — Codex は会話メモリの抽出・整理といった裏側の処理に GPT 系モデルを固定で使います。外部プロバイダー利用中はその呼び出しが外部プロバイダーへ流れ、画面に出ないまま OpenAI モデルとして課金されます（新規チャット 1 件あたり最大 3 回・各 1.5 万トークン規模）。このビルドは裏側の処理も、いま選んでいるモデルで動くよう自動で揃え、公式へ戻せば元の既定に戻します。
+            - **切り替える前に、何が起きるか教えてくれる** — ChatGPT 公式⇔外部プロバイダーの切り替えでは、Sites・音声入力・クラウドプロジェクトなどアカウント連携機能が使えなくなったり戻ったりします。本家は無言で切り替えるため「メニューが突然消えた」ように見えますが、このビルドは切り替え前に得るもの・失うものを確認ダイアログで表示します（「今後表示しない」も選べます）。
+            - **「公式に戻れなくなる」バグの修正** — API キーを環境変数やキーチェーンから渡すタイプの自作プロバイダー設定を取り込むと、本家はそれを誤って公式プロバイダーと判定し、ChatGPT アカウントに紐付けてしまいます。以後、公式へ戻す操作が安全装置に引っかかって毎回中断され、UI からは解除できません。この誤判定を根本から修正しました。
+            - **自動更新は無効** — 本家の自動更新を受けると、上記の修正がすべて消えた素の cc-switch に置き換わるため、意図的に止めています。更新は本家の変更を取り込んで再ビルドする方式です。
+
+            ### What's different from upstream (and why it matters)
+
+            - **Your hand-written config survives switching.** Stock cc-switch replaces Codex's entire config file with a stored snapshot on every provider switch, silently wiping anything you added by hand — trusted-project settings, plugins, your own provider definitions (known upstream issues #4254 / #3700 and more). This build only rewrites the keys cc-switch actually manages and leaves everything else untouched.
+            - **No surprise OpenAI charges.** Codex hardcodes GPT models for its background jobs (conversation-memory extraction and consolidation). While you are on a third-party provider those calls are routed there and quietly billed as OpenAI usage — up to three calls per new chat, ~15k tokens each, invisible in the UI. This build pins the background jobs to the model you actually selected, and restores the defaults when you return to the official provider.
+            - **You are told what a switch changes, before it happens.** Moving between the ChatGPT login and a custom provider silently gains or loses account-tied features (Sites, voice input, cloud projects). Stock cc-switch just switches, which reads as "my menus disappeared". This build shows a confirmation dialog spelling out what you gain and lose, with a "don't ask again" option.
+            - **Fixes a "can't switch back to official" bug.** If your provider reads its API key from the environment or the keychain, stock cc-switch misclassifies it as an official provider and binds it to your ChatGPT account; every later switch back then trips a safety guard and aborts, with no way to unbind from the UI. The misclassification is fixed at the root.
+            - **Auto-update is deliberately off.** Accepting an upstream update would replace this build with stock cc-switch and silently remove all of the above. Updates are taken by merging upstream and rebuilding.
+
+            ### インストール / Install（Apple Silicon）
+
+            Apple 公証を行っていないため、初回のみ隔離属性を外してから起動してください。
+            *The DMG is not notarized; clear the quarantine flag once before first launch:*
 
             ```sh
             xattr -dr com.apple.quarantine "/Applications/CC Switch.app"
             ```
 
-            または `.app` を右クリック → 「開く」でも起動できます。
+            または `.app` を右クリック → 「開く」。 / Or right-click the `.app` and choose "Open".
+
+            変更点の技術的詳細とセットアップ手順 / full technical details and setup: [docs/FORK_SETUP.ja.md](https://github.com/himiyosh/cc-switch/blob/himiyosh/local-customizations/docs/FORK_SETUP.ja.md)
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

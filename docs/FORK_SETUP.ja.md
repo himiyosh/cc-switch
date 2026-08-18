@@ -81,8 +81,8 @@ GitHub Actions が **macOS (Apple Silicon) の無署名ビルド**を作成し�
 DMG / zip を公開する。upstream 版と違い、updater 署名鍵や Apple Developer ID は不要。
 
 ```sh
-git tag v3.19.2-himiyosh.2
-git push fork v3.19.2-himiyosh.2
+git tag v3.19.2-custom.2
+git push fork v3.19.2-custom.2
 ```
 
 ---

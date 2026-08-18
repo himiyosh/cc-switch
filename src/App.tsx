@@ -1336,6 +1336,12 @@ function App() {
                     proxyStatus !== undefined && takeoverStatus !== undefined
                   }
                 />
+                <span
+                  className="select-none rounded border border-amber-400/40 bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-500"
+                  title="Unofficial custom fork build"
+                >
+                  himiyosh custom
+                </span>
                 <Button
                   variant="ghost"
                   size="icon"

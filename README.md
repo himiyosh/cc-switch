@@ -1,3 +1,9 @@
+> [!NOTE]
+> **これは [farion1231/cc-switch](https://github.com/farion1231/cc-switch) の非公式な個人カスタムフォークです。**
+> Codex を OpenRouter 等のカスタムプロバイダーと安全に往復させるための独自修正（config.toml 保護マージ、メモリモデルのピン、切り替え確認ダイアログ、インポート分類修正、OTA 更新無効化）を含みます。
+> 変更内容とセットアップ手順は [docs/FORK_SETUP.ja.md](docs/FORK_SETUP.ja.md) を、公式版は upstream の Releases をご利用ください。
+> *This is an unofficial personal fork with local Codex customizations. Release DMGs are ad-hoc signed (not notarized). For the official app, use upstream's releases.*
+
 <div align="center">
 
 # CC Switch

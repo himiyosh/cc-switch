@@ -1668,6 +1668,39 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
     }
 }
 
+/// Classify a Codex live config being imported as the `default` provider.
+///
+/// The deciding fact is where `config.toml` routes requests, not where the
+/// credential happens to live. A `model_provider` naming a custom block is a
+/// third-party setup even when no key appears anywhere in the file, because
+/// Codex also accepts a command-based `[model_providers.<id>.auth]` that reads
+/// the key from the environment at request time.
+///
+/// Getting this wrong is not cosmetic. `official` is what makes the edit form
+/// offer a ChatGPT account selector, and once an account is bound every later
+/// switch away from the provider runs the managed-account auth guard against a
+/// refresh token the Codex CLI keeps rotating — so the switch aborts and the
+/// user cannot get back to their ChatGPT login. Observed locally with a
+/// hand-written `[model_providers.openrouter]` whose key comes from
+/// `$OPENROUTER_API_KEY`, imported alongside a leftover ChatGPT `auth.json`.
+fn classify_imported_codex_category(settings_config: &Value) -> &'static str {
+    let config_text = settings_config.get("config").and_then(Value::as_str);
+    let has_provider_key =
+        crate::codex_config::extract_codex_api_key(settings_config.get("auth"), config_text)
+            .is_some();
+    let has_login_material = settings_config
+        .get("auth")
+        .is_some_and(crate::codex_config::codex_auth_has_login_material);
+    let routes_to_custom_provider =
+        config_text.is_some_and(crate::codex_config::codex_config_text_routes_to_custom_provider);
+
+    if has_login_material && !has_provider_key && !routes_to_custom_provider {
+        "official"
+    } else {
+        "custom"
+    }
+}
+
 /// Import default configuration from live files
 ///
 /// Returns `Ok(true)` if a provider was actually imported,
@@ -1787,25 +1820,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     );
     provider.category = Some(
         if matches!(app_type, AppType::Codex) {
-            let config_text = provider
-                .settings_config
-                .get("config")
-                .and_then(Value::as_str);
-            let has_provider_key = crate::codex_config::extract_codex_api_key(
-                provider.settings_config.get("auth"),
-                config_text,
-            )
-            .is_some();
-            let has_login_material = provider
-                .settings_config
-                .get("auth")
-                .is_some_and(crate::codex_config::codex_auth_has_login_material);
-
-            if has_login_material && !has_provider_key {
-                "official"
-            } else {
-                "custom"
-            }
+            classify_imported_codex_category(&provider.settings_config)
         } else {
             "custom"
         }
@@ -2226,6 +2241,71 @@ mod tests {
     use super::*;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
     use serde_json::json;
+
+    fn chatgpt_login_auth() -> serde_json::Value {
+        json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "tokens": { "account_id": "acct-1", "refresh_token": "rt.1.example" }
+        })
+    }
+
+    const OPENROUTER_LIVE_CONFIG: &str = r#"
+model = "deepseek/deepseek-v4-pro"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+
+[model_providers.openrouter.auth]
+command = "sh"
+args = ["-c", "echo $OPENROUTER_API_KEY"]
+"#;
+
+    #[test]
+    fn codex_import_routing_at_a_custom_provider_is_not_official() {
+        // A leftover ChatGPT auth.json plus a config that routes at OpenRouter:
+        // the old key-only heuristic called this `official` and bound it to the
+        // ChatGPT account, which then blocked every switch back.
+        let settings = json!({
+            "auth": chatgpt_login_auth(),
+            "config": OPENROUTER_LIVE_CONFIG,
+        });
+        assert_eq!(classify_imported_codex_category(&settings), "custom");
+    }
+
+    #[test]
+    fn codex_import_with_a_chatgpt_login_and_no_custom_route_stays_official() {
+        let settings = json!({
+            "auth": chatgpt_login_auth(),
+            "config": "model = \"gpt-5.6-sol\"\n",
+        });
+        assert_eq!(classify_imported_codex_category(&settings), "official");
+    }
+
+    #[test]
+    fn codex_import_routing_at_openai_stays_official() {
+        let settings = json!({
+            "auth": chatgpt_login_auth(),
+            "config": "model = \"gpt-5.6-sol\"\nmodel_provider = \"openai\"\n",
+        });
+        assert_eq!(classify_imported_codex_category(&settings), "official");
+    }
+
+    #[test]
+    fn codex_import_with_a_visible_provider_key_stays_custom() {
+        let settings = json!({
+            "auth": { "OPENAI_API_KEY": "sk-test" },
+            "config": "model = \"gpt-5.6-sol\"\n",
+        });
+        assert_eq!(classify_imported_codex_category(&settings), "custom");
+    }
+
+    #[test]
+    fn codex_import_without_any_login_material_is_custom() {
+        let settings = json!({ "auth": {}, "config": "model = \"gpt-5.6-sol\"\n" });
+        assert_eq!(classify_imported_codex_category(&settings), "custom");
+    }
 
     #[test]
     fn kimi_for_coding_effective_settings_backfill_256k_context() {

@@ -3747,12 +3747,7 @@ impl ProxyService {
                 }
 
                 let config_result = prepared_cfg.as_deref().map_or(Ok(()), |cfg| {
-                    // Local customization: route through the same merge the
-                    // codex_config writers use, so a proxy-takeover write cannot
-                    // drop config.toml sections cc-switch does not manage.
-                    let path = get_codex_config_path();
-                    let merged = crate::codex_config::merge_codex_live_config_text(cfg, &path);
-                    crate::config::write_text_file(&path, &merged)
+                    crate::config::write_text_file(&get_codex_config_path(), cfg)
                         .map_err(|error| format!("写入 Codex config 失败: {error}"))
                 });
                 match config_result {
@@ -3772,10 +3767,7 @@ impl ProxyService {
                         // Unguarded provider writes preserve an existing login;
                         // only restore transactions interpret empty auth as an
                         // exact-generation deletion.
-                        // Local customization: merge rather than overwrite.
-                        let path = get_codex_config_path();
-                        let merged = crate::codex_config::merge_codex_live_config_text(cfg, &path);
-                        crate::config::write_text_file(&path, &merged)
+                        crate::config::write_text_file(&get_codex_config_path(), cfg)
                             .map_err(|e| format!("写入 Codex config 失败: {e}"))
                     } else {
                         crate::codex_config::write_codex_live_atomic(auth, Some(cfg))
@@ -3790,13 +3782,8 @@ impl ProxyService {
                             .map_err(|e| format!("写入 Codex auth 失败: {e}"))
                     }
                 }
-                (None, Some(cfg)) => {
-                    // Local customization: merge rather than overwrite.
-                    let path = get_codex_config_path();
-                    let merged = crate::codex_config::merge_codex_live_config_text(cfg, &path);
-                    crate::config::write_text_file(&path, &merged)
-                        .map_err(|e| format!("写入 Codex config 失败: {e}"))
-                }
+                (None, Some(cfg)) => crate::config::write_text_file(&get_codex_config_path(), cfg)
+                    .map_err(|e| format!("写入 Codex config 失败: {e}")),
                 (None, None) => Ok(()),
             }
         };

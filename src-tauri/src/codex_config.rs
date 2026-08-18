@@ -861,6 +861,26 @@ pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
             .any(|reserved| reserved.eq_ignore_ascii_case(id))
 }
 
+/// Whether a Codex `config.toml` routes requests at a custom (non-OpenAI)
+/// `model_provider`.
+///
+/// This is the one fact that decides whether Codex talks to the user's ChatGPT
+/// account or to a third-party upstream, and it holds regardless of where the
+/// credential lives. Codex accepts a provider key inline, as
+/// `experimental_bearer_token`, or from a command-based
+/// `[model_providers.<id>.auth]` resolved at request time; only the first two
+/// are visible to [`extract_codex_api_key`], so key detection alone cannot tell
+/// a third-party setup apart from an official one.
+///
+/// An unparseable config yields `false`. Callers use this to *demote* a
+/// classification, and a file that cannot be read is not evidence of anything.
+pub fn codex_config_text_routes_to_custom_provider(config_text: &str) -> bool {
+    let Ok(doc) = config_text.parse::<DocumentMut>() else {
+        return false;
+    };
+    active_codex_model_provider_id(&doc).is_some_and(|id| is_custom_codex_model_provider_id(&id))
+}
+
 /// Write only Codex `config.toml` for provider switching.
 ///
 /// Codex login state lives in `auth.json`; provider routing, endpoint, model,
@@ -955,14 +975,37 @@ const CODEX_APPLY_IF_PRESENT_TOP_LEVEL_KEYS: [&str; 4] = [
 /// `[model_providers.*]` ids cc-switch owns. Any other block under
 /// `model_providers` is the user's own and must survive untouched — this is what
 /// keeps a hand-written `[model_providers.openrouter]` alive.
-fn codex_managed_provider_ids(incoming: &DocumentMut) -> Vec<String> {
+fn codex_managed_provider_ids(incoming: &DocumentMut, existing: &DocumentMut) -> Vec<String> {
     let mut ids = vec![
         CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string(),
         CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID.to_string(),
     ];
     // Whatever the incoming text is actively pointing at is being (re)defined.
-    if let Some(active) = incoming.get("model_provider").and_then(|item| item.as_str()) {
+    if let Some(active) = incoming
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+    {
         ids.push(active.to_string());
+    }
+    // A block already on disk carrying `experimental_bearer_token` was written
+    // by cc-switch: that field is how it hands a provider key to Codex, and
+    // where proxy takeover parks its PROXY_MANAGED placeholder. Hand-written
+    // blocks authenticate through `env_key` or a `[model_providers.<id>.auth]`
+    // command instead. Claiming these leaves user-authored routes alone while
+    // making sure a departing provider strands neither a dead proxy route nor a
+    // live key on disk.
+    if let Some(existing_providers) = existing
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+    {
+        for (id, block) in existing_providers.iter() {
+            if block
+                .as_table_like()
+                .is_some_and(|table| table.contains_key("experimental_bearer_token"))
+            {
+                ids.push(id.to_string());
+            }
+        }
     }
     ids
 }
@@ -1005,7 +1048,7 @@ pub(crate) fn merge_codex_live_config_text(incoming_text: &str, config_path: &Pa
     }
 
     // `model_providers` is merged per-id rather than wholesale.
-    let managed_ids = codex_managed_provider_ids(&incoming);
+    let managed_ids = codex_managed_provider_ids(&incoming, &merged);
     let incoming_providers = incoming
         .get("model_providers")
         .and_then(|item| item.as_table());
@@ -3256,6 +3299,53 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
     use std::ffi::OsString;
+
+    #[test]
+    fn custom_model_provider_routing_is_detected_without_any_visible_key() {
+        // The key lives in $OPENROUTER_API_KEY, resolved by a command-based
+        // provider auth block, so no key text appears in the file at all.
+        let config = r#"
+model = "deepseek/deepseek-v4-pro"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+
+[model_providers.openrouter.auth]
+command = "sh"
+args = ["-c", "echo $OPENROUTER_API_KEY"]
+"#;
+        assert!(extract_codex_api_key(None, Some(config)).is_none());
+        assert!(codex_config_text_routes_to_custom_provider(config));
+    }
+
+    #[test]
+    fn reserved_model_provider_ids_are_not_custom_routing() {
+        for id in ["openai", "OpenAI", "ollama", "amazon-bedrock", "oss"] {
+            assert!(
+                !codex_config_text_routes_to_custom_provider(&format!(
+                    "model_provider = \"{id}\"\n"
+                )),
+                "{id} must not count as custom routing"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_blank_or_unparseable_model_provider_is_not_custom_routing() {
+        for config in [
+            "",
+            "model = \"gpt-5.6-sol\"\n",
+            "model_provider = \"   \"\n",
+            // unterminated string: the document does not parse
+            "model = \"oops\nmodel_provider = \"openrouter\"\n",
+        ] {
+            assert!(
+                !codex_config_text_routes_to_custom_provider(config),
+                "unexpected custom routing for {config:?}"
+            );
+        }
+    }
 
     struct CodexLiveTestHome {
         _dir: tempfile::TempDir,
@@ -5773,7 +5863,10 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
 
         for key in ["projects", "plugins", "desktop", "features", "notify"] {
-            assert!(parsed.contains_key(key), "{key} must survive an empty snapshot");
+            assert!(
+                parsed.contains_key(key),
+                "{key} must survive an empty snapshot"
+            );
         }
         assert_eq!(parsed["desktop"]["appearanceTheme"].as_str(), Some("dark"));
         // Managed keys are cleared, which is what "switch to the empty official
@@ -5889,6 +5982,67 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
         assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("max"));
         assert_eq!(parsed["disable_response_storage"].as_bool(), Some(true));
+    }
+
+    /// A departing provider block that cc-switch itself wrote must go, or a
+    /// proxy takeover leaves a dead `PROXY_MANAGED` route behind on disk.
+    #[test]
+    fn merge_clears_a_departing_block_that_carries_a_bearer_token() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = write_tmp_config(
+            &temp,
+            concat!(
+                "model_provider = \"rightcode\"\n",
+                "\n[model_providers.rightcode]\n",
+                "base_url = \"http://127.0.0.1:51554/v1\"\n",
+                "experimental_bearer_token = \"PROXY_MANAGED\"\n",
+            ),
+        );
+
+        let incoming = concat!(
+            "model = \"gpt-5.4\"\n",
+            "model_provider = \"cc-switch-official\"\n",
+            "\n[model_providers.cc-switch-official]\nrequires_openai_auth = true\n",
+        );
+        let out = merge_codex_live_config_text(incoming, &path);
+
+        assert!(!out.contains("PROXY_MANAGED"), "{out}");
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+        assert!(!parsed["model_providers"]
+            .as_table()
+            .expect("table")
+            .contains_key("rightcode"));
+        assert_eq!(
+            parsed["model_providers"]["cc-switch-official"]["requires_openai_auth"].as_bool(),
+            Some(true)
+        );
+    }
+
+    /// ...but a hand-written block survives even when it is the one being left
+    /// behind. It authenticates through its own `auth` command, so cc-switch has
+    /// no claim on it.
+    #[test]
+    fn merge_keeps_the_departing_block_when_the_user_wrote_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = write_tmp_config(
+            &temp,
+            concat!(
+                "model_provider = \"openrouter\"\n",
+                "\n[model_providers.openrouter]\nbase_url = \"https://openrouter.ai/api/v1\"\n",
+                "\n[model_providers.openrouter.auth]\ncommand = \"sh\"\n",
+                "args = [\"-c\", \"echo $OPENROUTER_API_KEY\"]\n",
+            ),
+        );
+
+        let out = merge_codex_live_config_text("model = \"gpt-5.6-sol\"\n", &path);
+        let parsed: toml::Table = toml::from_str(&out).expect("valid toml");
+
+        assert!(!parsed.contains_key("model_provider"));
+        assert_eq!(
+            parsed["model_providers"]["openrouter"]["auth"]["command"].as_str(),
+            Some("sh"),
+            "the user's own provider block must survive being switched away from"
+        );
     }
 
     #[test]
